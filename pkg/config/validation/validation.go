@@ -31,7 +31,7 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/gogo/protobuf/types"
 	"github.com/hashicorp/go-multierror"
-	"github.com/lestrrat-go/jwx/jwt"
+	"github.com/lestrrat-go/jwx/jwk"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -561,13 +561,26 @@ func validateTLSOptions(tls *networking.ServerTLSSettings) (v Validation) {
 	}
 
 	invalidCiphers := sets.NewSet()
+	validCiphers := sets.NewSet()
+	duplicateCiphers := sets.NewSet()
 	for _, cs := range tls.CipherSuites {
 		if !security.IsValidCipherSuite(cs) {
 			invalidCiphers.Insert(cs)
+		} else {
+			if !validCiphers.Contains(cs) {
+				validCiphers.Insert(cs)
+			} else {
+				duplicateCiphers.Insert(cs)
+			}
 		}
 	}
+
 	if len(invalidCiphers) > 0 {
-		return WrapWarning(fmt.Errorf("ignoring invalid cipher suites: %v", invalidCiphers.SortedList()))
+		v = appendWarningf(v, "ignoring invalid cipher suites: %v", invalidCiphers.SortedList())
+	}
+
+	if len(duplicateCiphers) > 0 {
+		v = appendWarningf(v, "ignoring duplicate cipher suites: %v", duplicateCiphers.SortedList())
 	}
 
 	if tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL {
@@ -581,6 +594,14 @@ func validateTLSOptions(tls *networking.ServerTLSSettings) (v Validation) {
 		}
 		if tls.CaCertificates != "" {
 			v = appendValidation(v, fmt.Errorf("ISTIO_MUTUAL TLS cannot have associated CA bundle"))
+		}
+		if tls.CredentialName != "" {
+			if features.EnableLegacyIstioMutualCredentialName {
+				// Legacy mode enabled, just warn
+				v = appendWarningf(v, "ISTIO_MUTUAL TLS cannot have associated credentialName")
+			} else {
+				v = appendValidation(v, fmt.Errorf("ISTIO_MUTUAL TLS cannot have associated credentialName"))
+			}
 		}
 
 		return
@@ -1025,6 +1046,27 @@ var ValidateSidecar = registerValidateFunc("ValidateSidecar",
 					}
 				}
 			}
+
+			if i.Tls != nil {
+				if len(i.Tls.SubjectAltNames) > 0 {
+					errs = appendValidation(errs, fmt.Errorf("sidecar: subjectAltNames is not supported in ingress tls"))
+				}
+				if i.Tls.HttpsRedirect {
+					errs = appendValidation(errs, fmt.Errorf("sidecar: httpsRedirect is not supported"))
+				}
+				if i.Tls.CredentialName != "" {
+					errs = appendValidation(errs, fmt.Errorf("sidecar: credentialName is not currently supported"))
+				}
+				if i.Tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL || i.Tls.Mode == networking.ServerTLSSettings_AUTO_PASSTHROUGH {
+					errs = appendValidation(errs, fmt.Errorf("configuration is invalid: cannot set mode to %s in sidecar ingress tls", i.Tls.Mode.String()))
+				}
+				protocol := protocol.Parse(i.Port.Protocol)
+				if !protocol.IsTLS() {
+					errs = appendValidation(errs, fmt.Errorf("server cannot have TLS settings for non HTTPS/TLS ports"))
+				}
+				errs = appendValidation(errs, validateTLSOptions(i.Tls))
+			}
+
 		}
 
 		portMap = make(map[uint32]struct{})
@@ -1585,9 +1627,17 @@ func ValidateMeshConfigProxyConfig(config *meshconfig.ProxyConfig) (errs error) 
 		errs = multierror.Append(errs, errors.New("binary path must be set"))
 	}
 
-	if config.ServiceCluster == "" {
-		errs = multierror.Append(errs, errors.New("service cluster must be set"))
+	clusterName := config.GetClusterName()
+	switch naming := clusterName.(type) {
+	case *meshconfig.ProxyConfig_ServiceCluster:
+		if naming.ServiceCluster == "" {
+			errs = multierror.Append(errs, errors.New("service cluster must be specified"))
+		}
+	case *meshconfig.ProxyConfig_TracingServiceName_: // intentionally left empty for now
+	default:
+		errs = multierror.Append(errs, errors.New("oneof service cluster or tracing service name must be specified"))
 	}
+
 	if err := ValidateParentAndDrain(config.DrainDuration, config.ParentShutdownDuration); err != nil {
 		errs = multierror.Append(errs, multierror.Prefix(err, "invalid parent and drain time combination"))
 	}
@@ -1872,7 +1922,7 @@ func validateJwtRule(rule *security_beta.JWTRule) (errs error) {
 	}
 
 	if rule.Jwks != "" {
-		_, err := jwt.Parse([]byte(rule.Jwks))
+		_, err := jwk.Parse([]byte(rule.Jwks))
 		if err != nil {
 			errs = multierror.Append(errs, fmt.Errorf("jwks parse error: %v", err))
 		}
@@ -1936,16 +1986,8 @@ var ValidateVirtualService = registerValidateFunc("ValidateVirtualService",
 			return nil, errors.New("cannot cast to virtual service")
 		}
 		errs := Validation{}
-		isDelegate := false
 		if len(virtualService.Hosts) == 0 {
-			if features.EnableVirtualServiceDelegate {
-				isDelegate = true
-			} else {
-				errs = appendValidation(errs, fmt.Errorf("virtual service must have at least one host"))
-			}
-		}
-
-		if isDelegate {
+			// This must be delegate - enforce delegate validations.
 			if len(virtualService.Gateways) != 0 {
 				// meaningless to specify gateways in delegate
 				errs = appendValidation(errs, fmt.Errorf("delegate virtual service must have no gateways specified"))
@@ -2029,7 +2071,7 @@ var ValidateVirtualService = registerValidateFunc("ValidateVirtualService",
 				errs = appendValidation(errs, errors.New("http route may not be null"))
 				continue
 			}
-			errs = appendValidation(errs, validateHTTPRoute(httpRoute, isDelegate))
+			errs = appendValidation(errs, validateHTTPRoute(httpRoute, len(virtualService.Hosts) == 0))
 		}
 		for _, tlsRoute := range virtualService.Tls {
 			errs = appendValidation(errs, validateTLSRoute(tlsRoute, virtualService))
@@ -3239,7 +3281,10 @@ func validateLocalityLbSetting(lb *networking.LocalityLoadBalancerSetting) error
 		if failover.From == failover.To {
 			return fmt.Errorf("locality lb failover settings must specify different regions")
 		}
-		if strings.Contains(failover.To, "*") {
+		if strings.Contains(failover.From, "/") || strings.Contains(failover.To, "/") {
+			return fmt.Errorf("locality lb failover only specify region")
+		}
+		if strings.Contains(failover.To, "*") || strings.Contains(failover.From, "*") {
 			return fmt.Errorf("locality lb failover region should not contain '*' wildcard")
 		}
 	}
@@ -3328,6 +3373,7 @@ func getLocalityParam(locality string) (string, string, string, int, error) {
 
 // ValidateMeshNetworks validates meshnetworks.
 func ValidateMeshNetworks(meshnetworks *meshconfig.MeshNetworks) (errs error) {
+	// TODO validate using the same gateway on multiple networks?
 	for name, network := range meshnetworks.Networks {
 		if err := validateNetwork(network); err != nil {
 			errs = multierror.Append(errs, multierror.Prefix(err, fmt.Sprintf("invalid network %v:", name)))
@@ -3356,8 +3402,13 @@ func validateNetwork(network *meshconfig.Network) (errs error) {
 				errs = multierror.Append(errs, err)
 			}
 		case *meshconfig.Network_IstioNetworkGateway_Address:
-			if err := ValidateIPAddress(g.Address); err != nil {
-				errs = multierror.Append(errs, err)
+			if ipErr := ValidateIPAddress(g.Address); ipErr != nil {
+				if !features.ResolveHostnameGateways {
+					err := fmt.Errorf("%v (hostname is allowed if RESOLVE_HOSTNAME_GATEWAYS is enabled)", ipErr)
+					errs = multierror.Append(errs, err)
+				} else if fqdnErr := ValidateFQDN(g.Address); fqdnErr != nil {
+					errs = multierror.Append(fmt.Errorf("%v is not a valid IP address or DNS name", g.Address))
+				}
 			}
 		}
 		if err := ValidatePort(int(n.Port)); err != nil {
@@ -3424,6 +3475,9 @@ func validateTelemetryAccessLogging(logging []*telemetry.AccessLogging) (v Valid
 		}
 		if len(l.Providers) > 1 {
 			v = appendValidation(v, Warningf("accessLogging[%d]: multiple providers is not currently supported", idx))
+		}
+		if l.Filter != nil {
+			v = appendValidation(v, validateTelemetryFilter(l.Filter))
 		}
 		v = appendValidation(v, validateTelemetryProviders(l.Providers))
 	}

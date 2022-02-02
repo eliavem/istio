@@ -91,7 +91,7 @@ func (s *DiscoveryServer) StreamDeltas(stream DeltaDiscoveryStream) error {
 
 	// Block until either a request is received or a push is triggered.
 	// We need 2 go routines because 'read' blocks in Recv().
-	go s.receiveDelta(con)
+	go s.receiveDelta(con, ids)
 
 	// Wait for the proxy to be fully initialized before we start serving traffic. Because
 	// initialization doesn't have dependencies that will block, there is no need to add any timeout
@@ -99,10 +99,6 @@ func (s *DiscoveryServer) StreamDeltas(stream DeltaDiscoveryStream) error {
 	// reqChannel and the connection not being enqueued for pushes to pushChannel until the
 	// initialization is complete.
 	<-con.initialized
-	// authorize client
-	if err = s.authorize(con, ids); err != nil {
-		return err
-	}
 
 	for {
 		select {
@@ -192,7 +188,7 @@ func (s *DiscoveryServer) pushConnectionDelta(con *Connection, pushEv *Event) er
 	return nil
 }
 
-func (s *DiscoveryServer) receiveDelta(con *Connection) {
+func (s *DiscoveryServer) receiveDelta(con *Connection, identities []string) {
 	defer func() {
 		close(con.deltaReqChan)
 		close(con.errorChan)
@@ -223,7 +219,7 @@ func (s *DiscoveryServer) receiveDelta(con *Connection) {
 				con.errorChan <- status.New(codes.InvalidArgument, "missing node information").Err()
 				return
 			}
-			if err := s.initConnection(req.Node, con); err != nil {
+			if err := s.initConnection(req.Node, con, identities); err != nil {
 				con.errorChan <- err
 				return
 			}
@@ -269,7 +265,7 @@ func (conn *Connection) sendDelta(res *discovery.DeltaDiscoveryResponse) error {
 	return err
 }
 
-// processRequest is handling one request. This is currently called from the 'main' thread, which also
+// processDeltaRequest is handling one request. This is currently called from the 'main' thread, which also
 // handles 'push' requests and close - the code will eventually call the 'push' code, and it needs more mutex
 // protection. Original code avoided the mutexes by doing both 'push' and 'process requests' in same thread.
 func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryRequest, con *Connection) error {
@@ -320,7 +316,7 @@ func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryReque
 	return s.pushDeltaXds(con, push, con.Watched(req.TypeUrl), req.ResourceNamesSubscribe, request)
 }
 
-// shouldRespond determines whether this request needs to be responded back. It applies the ack/nack rules as per xds protocol
+// shouldRespondDelta determines whether this request needs to be responded back. It applies the ack/nack rules as per xds protocol
 // using WatchedResource for previous state and discovery request for the current state.
 func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery.DeltaDiscoveryRequest) bool {
 	stype := v3.GetShortType(request.TypeUrl)
@@ -336,7 +332,9 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
 			s.StatusGen.OnNack(con.proxy, deltaToSotwRequest(request))
 		}
 		con.proxy.Lock()
-		con.proxy.WatchedResources[request.TypeUrl].NonceNacked = request.ResponseNonce
+		if w, f := con.proxy.WatchedResources[request.TypeUrl]; f {
+			w.NonceNacked = request.ResponseNonce
+		}
 		con.proxy.Unlock()
 		return false
 	}
@@ -392,9 +390,9 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
 	newAck := request.ResponseNonce != ""
 	if newAck != oldAck {
 		// Not sure which is better, lets just log if they don't match for now and compare.
-		log.Errorf("dADS:%s: New ACK and old ACK check mismatch: %v vs %v", stype, oldAck, newAck)
+		log.Errorf("dADS:%s: New ACK and old ACK check mismatch: %v vs %v", stype, newAck, oldAck)
 		if features.EnableUnsafeAssertions {
-			panic(fmt.Sprintf("dADS:%s: New ACK and old ACK check mismatch: %v vs %v", stype, oldAck, newAck))
+			panic(fmt.Sprintf("dADS:%s: New ACK and old ACK check mismatch: %v vs %v", stype, newAck, oldAck))
 		}
 	}
 	// Envoy can send two DiscoveryRequests with same version and nonce
@@ -423,6 +421,15 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection, push *model.PushContext,
 	}
 	t0 := time.Now()
 
+	// If subscribe is set, client is requesting specific resources. We should just generate the
+	// new resources it needs, rather than the entire set of known resources.
+	if subscribe != nil {
+		w = &model.WatchedResource{
+			TypeUrl:       w.TypeUrl,
+			ResourceNames: subscribe,
+		}
+	}
+
 	var res model.Resources
 	var deletedRes model.DeletedResources
 	var logdata model.XdsLogDetails
@@ -434,7 +441,7 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection, push *model.PushContext,
 	case model.XdsResourceGenerator:
 		res, logdata, err = g.Generate(con.proxy, push, w, req)
 	}
-	if err != nil || res == nil {
+	if err != nil || (res == nil && deletedRes == nil) {
 		// If we have nothing to send, report that we got an ACK for this version.
 		if s.StatusReporter != nil {
 			s.StatusReporter.RegisterEvent(con.ConID, w.TypeUrl, push.LedgerVersion)
@@ -442,21 +449,6 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection, push *model.PushContext,
 		return err
 	}
 	defer func() { recordPushTime(w.TypeUrl, time.Since(t0)) }()
-
-	if subscribe != nil {
-		// If subscribe is set, client is requesting specific resources. We should just give it the
-		// new resources it needs, rather than the entire set of known resources.
-		subres := sets.NewSet(subscribe...)
-		filteredResponse := make([]*discovery.Resource, 0, len(subscribe))
-		for _, r := range res {
-			if subres.Contains(r.Name) {
-				filteredResponse = append(filteredResponse, r)
-			} else {
-				log.Debugf("ADS:%v SKIP %v", v3.GetShortType(w.TypeUrl), r.Name)
-			}
-		}
-		res = filteredResponse
-	}
 	resp := &discovery.DeltaDiscoveryResponse{
 		ControlPlane: ControlPlane(),
 		TypeUrl:      w.TypeUrl,
@@ -465,7 +457,6 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection, push *model.PushContext,
 		Nonce:             nonce(push.LedgerVersion),
 		Resources:         res,
 	}
-
 	currentResources := extractNames(res)
 	if usedDelta {
 		resp.RemovedResources = deletedRes
@@ -478,7 +469,8 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection, push *model.PushContext,
 	if len(resp.RemovedResources) > 0 {
 		log.Debugf("ADS:%v %s REMOVE %v", v3.GetShortType(w.TypeUrl), con.ConID, resp.RemovedResources)
 	}
-	if isWildcardTypeURL(w.TypeUrl) {
+	// normally wildcard xds `subscribe` is always nil, just in case there are some extended type not handled correctly.
+	if subscribe == nil && isWildcardTypeURL(w.TypeUrl) {
 		// this is probably a bad idea...
 		con.proxy.Lock()
 		w.ResourceNames = currentResources

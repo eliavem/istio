@@ -37,7 +37,7 @@ setup_and_export_git_sha
 source "${ROOT}/common/scripts/kind_provisioner.sh"
 
 TOPOLOGY=SINGLE_CLUSTER
-NODE_IMAGE="gcr.io/istio-testing/kind-node:v1.22.2"
+NODE_IMAGE="gcr.io/istio-testing/kind-node:v1.23.0"
 KIND_CONFIG=""
 CLUSTER_TOPOLOGY_CONFIG_FILE="${ROOT}/prow/config/topology/multicluster.json"
 
@@ -133,7 +133,7 @@ export ARTIFACTS="${ARTIFACTS:-$(mktemp -d)}"
 trace "init" make init
 
 if [[ -z "${SKIP_SETUP:-}" ]]; then
-  export DEFAULT_CLUSTER_YAML="./prow/config/mixedlb-service.yaml"
+  export DEFAULT_CLUSTER_YAML="./prow/config/default.yaml"
   export METRICS_SERVER_CONFIG_DIR='./prow/config/metrics'
 
   if [[ "${TOPOLOGY}" == "SINGLE_CLUSTER" ]]; then

@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	kubeExtInformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
 	kubeVersion "k8s.io/apimachinery/pkg/version"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/dynamic"
@@ -75,6 +76,11 @@ type MockClient struct {
 	ConfigValue       *rest.Config
 	IstioVersions     *version.MeshInfo
 	KubernetesVersion uint
+	IstiodVersion     string
+}
+
+func (c MockClient) ExtInformer() kubeExtInformers.SharedInformerFactory {
+	panic("not used in mock")
 }
 
 func (c MockClient) Istio() istioclient.Interface {
@@ -150,6 +156,15 @@ func (c MockClient) RESTConfig() *rest.Config {
 }
 
 func (c MockClient) GetIstioVersions(_ context.Context, _ string) (*version.MeshInfo, error) {
+	if c.IstiodVersion != "" {
+		server := version.BuildInfo{}
+		setServerInfoWithIstiodVersionInfo(&server, c.IstiodVersion)
+		return &version.MeshInfo{
+			{
+				Info: server,
+			},
+		}, nil
+	}
 	return c.IstioVersions, nil
 }
 

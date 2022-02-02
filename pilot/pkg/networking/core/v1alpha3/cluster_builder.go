@@ -223,7 +223,7 @@ func (cb *ClusterBuilder) buildSubsetCluster(opts buildClusterOpts, destRule *co
 	maybeApplyEdsConfig(subsetCluster.cluster)
 
 	if cb.proxyType == model.Router || opts.direction == model.TrafficDirectionOutbound {
-		cb.applyMetadataExchange(opts.mutable.cluster)
+		cb.applyMetadataExchange(cb.req.Push, opts.mutable.cluster)
 	}
 
 	// Add the DestinationRule+subsets metadata. Metadata here is generated on a per-cluster
@@ -267,7 +267,7 @@ func (cb *ClusterBuilder) applyDestinationRule(mc *MutableCluster, clusterMode C
 	maybeApplyEdsConfig(mc.cluster)
 
 	if cb.proxyType == model.Router || opts.direction == model.TrafficDirectionOutbound {
-		cb.applyMetadataExchange(opts.mutable.cluster)
+		cb.applyMetadataExchange(cb.req.Push, opts.mutable.cluster)
 	}
 
 	if destRule != nil {
@@ -283,8 +283,8 @@ func (cb *ClusterBuilder) applyDestinationRule(mc *MutableCluster, clusterMode C
 	return subsetClusters
 }
 
-func (cb *ClusterBuilder) applyMetadataExchange(c *cluster.Cluster) {
-	if features.MetadataExchange {
+func (cb *ClusterBuilder) applyMetadataExchange(pc *model.PushContext, c *cluster.Cluster) {
+	if features.MetadataExchange && util.CheckProxyVerionForMX(pc, model.ParseIstioVersion(cb.proxyVersion)) {
 		c.Filters = append(c.Filters, xdsfilters.TCPClusterMx)
 	}
 }
@@ -697,13 +697,12 @@ func (cb *ClusterBuilder) buildDefaultPassthroughCluster() *cluster.Cluster {
 		ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_ORIGINAL_DST},
 		ConnectTimeout:       gogo.DurationToProtoDuration(cb.req.Push.Mesh.ConnectTimeout),
 		LbPolicy:             cluster.Cluster_CLUSTER_PROVIDED,
+		TypedExtensionProtocolOptions: map[string]*any.Any{
+			v3.HttpProtocolOptionsType: passthroughHttpProtocolOptions,
+		},
 	}
-	cluster.TypedExtensionProtocolOptions = map[string]*any.Any{
-		v3.HttpProtocolOptionsType: passthroughHttpProtocolOptions,
-	}
-	passthroughSettings := &networking.ConnectionPoolSettings{}
-	cb.applyConnectionPool(cb.req.Push.Mesh, NewMutableCluster(cluster), passthroughSettings)
-	cb.applyMetadataExchange(cluster)
+	cb.applyConnectionPool(cb.req.Push.Mesh, NewMutableCluster(cluster), &networking.ConnectionPoolSettings{})
+	cb.applyMetadataExchange(cb.req.Push, cluster)
 	return cluster
 }
 
@@ -920,16 +919,15 @@ func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig, mc *M
 
 	cb.applyDefaultConnectionPool(mc.cluster)
 	if settings.Tcp != nil {
-		if settings.Tcp.ConnectTimeout != nil {
+		if settings.Tcp != nil && settings.Tcp.ConnectTimeout != nil {
 			mc.cluster.ConnectTimeout = gogo.DurationToProtoDuration(settings.Tcp.ConnectTimeout)
 		}
 
-		if settings.Tcp.MaxConnections > 0 {
+		if settings.Tcp != nil && settings.Tcp.MaxConnections > 0 {
 			threshold.MaxConnections = &wrappers.UInt32Value{Value: uint32(settings.Tcp.MaxConnections)}
 		}
-
-		applyTCPKeepalive(mesh, mc.cluster, settings)
 	}
+	applyTCPKeepalive(mesh, mc.cluster, settings.Tcp)
 
 	mc.cluster.CircuitBreakers = &cluster.CircuitBreakers{
 		Thresholds: []*cluster.CircuitBreakers_Thresholds{threshold},
@@ -940,7 +938,9 @@ func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig, mc *M
 			mc.httpProtocolOptions = &http.HttpProtocolOptions{}
 		}
 		commonOptions := mc.httpProtocolOptions
-		commonOptions.CommonHttpProtocolOptions = &core.HttpProtocolOptions{}
+		if commonOptions.CommonHttpProtocolOptions == nil {
+			commonOptions.CommonHttpProtocolOptions = &core.HttpProtocolOptions{}
+		}
 		if idleTimeout != nil {
 			idleTimeoutDuration := gogo.DurationToProtoDuration(idleTimeout)
 			commonOptions.CommonHttpProtocolOptions.IdleTimeout = idleTimeoutDuration
@@ -1042,10 +1042,18 @@ func (cb *ClusterBuilder) buildUpstreamClusterTLSContext(opts *buildClusterOpts,
 		// The code has repeated snippets because We want to use predefined alpn strings for efficiency.
 		if cb.IsHttp2Cluster(c) {
 			// This is HTTP/2 in-mesh cluster, advertise it with ALPN.
-			tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2WithMxc
+			if features.MetadataExchange {
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2WithMxc
+			} else {
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2
+			}
 		} else {
 			// This is in-mesh cluster, advertise it with ALPN.
-			tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshWithMxc
+			if features.MetadataExchange {
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshWithMxc
+			} else {
+				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMesh
+			}
 		}
 	case networking.ClientTLSSettings_SIMPLE:
 		tlsContext = &auth.UpstreamTlsContext{

@@ -31,7 +31,7 @@ import (
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	gogojsonpb "github.com/gogo/protobuf/jsonpb"
 	any "google.golang.org/protobuf/types/known/anypb"
-	structpb "google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
@@ -50,10 +50,7 @@ import (
 	"istio.io/pkg/monitoring"
 )
 
-var (
-	_ mesh.Holder         = &Environment{}
-	_ mesh.NetworksHolder = &Environment{}
-)
+var _ mesh.Holder = &Environment{}
 
 // Environment provides an aggregate environmental API for Pilot
 type Environment struct {
@@ -71,7 +68,9 @@ type Environment struct {
 	// network. Each network provides information about the endpoints in a
 	// routable L3 network. A single routable L3 network can have one or more
 	// service registries.
-	mesh.NetworksWatcher
+	NetworksWatcher mesh.NetworksWatcher
+
+	NetworkManager *NetworkManager
 
 	// PushContext holds information during push generation. It is reset on config change, at the beginning
 	// of the pushAll. It will hold all errors and stats and possibly caches needed during the entire cache computation.
@@ -123,13 +122,6 @@ func (e *Environment) AddMeshHandler(h func()) {
 	}
 }
 
-func (e *Environment) Networks() *meshconfig.MeshNetworks {
-	if e != nil && e.NetworksWatcher != nil {
-		return e.NetworksWatcher.Networks()
-	}
-	return nil
-}
-
 func (e *Environment) AddNetworksHandler(h func()) {
 	if e != nil && e.NetworksWatcher != nil {
 		e.NetworksWatcher.AddNetworksHandler(h)
@@ -158,6 +150,11 @@ func (e *Environment) Init() {
 
 	// Create the cluster-local service registry.
 	e.clusterLocalServices = NewClusterLocalProvider(e)
+}
+
+func (e *Environment) InitNetworksManager(updater XDSUpdater) (err error) {
+	e.NetworkManager, err = NewNetworkManager(e, updater)
+	return
 }
 
 func (e *Environment) ClusterLocal() ClusterLocalProvider {
@@ -221,7 +218,7 @@ type XdsResourceGenerator interface {
 // XdsDeltaResourceGenerator generates Sotw and delta resources.
 type XdsDeltaResourceGenerator interface {
 	XdsResourceGenerator
-	// Generate returns the changed and removed resources, along with whether or not delta was actually used.
+	// GenerateDeltas returns the changed and removed resources, along with whether or not delta was actually used.
 	GenerateDeltas(proxy *Proxy, push *PushContext, updates *PushRequest, w *WatchedResource) (Resources, DeletedResources, XdsLogDetails, bool, error)
 }
 
@@ -307,6 +304,8 @@ type Proxy struct {
 	XdsNode *core.Node
 
 	CatchAllVirtualHost *route.VirtualHost
+
+	AutoregisteredWorkloadEntryName string
 }
 
 // WatchedResource tracks an active DiscoveryRequest subscription.
@@ -608,6 +607,14 @@ type NodeMetadata struct {
 
 	// ExitOnZeroActiveConnections terminates Envoy if there are no active connections if set.
 	ExitOnZeroActiveConnections StringBool `json:"EXIT_ON_ZERO_ACTIVE_CONNECTIONS,omitempty"`
+
+	// InboundListenerExactBalance sets connection balance config to use exact_balance for virtualInbound,
+	// as long as QUIC, since it uses UDP, isn't also used.
+	InboundListenerExactBalance StringBool `json:"INBOUND_LISTENER_EXACT_BALANCE,omitempty"`
+
+	// OutboundListenerExactBalance sets connection balance config to use exact_balance for outbound
+	// redirected tcp listeners. This does not change the virtualOutbound listener.
+	OutboundListenerExactBalance StringBool `json:"OUTBOUND_LISTENER_EXACT_BALANCE,omitempty"`
 
 	// Contains a copy of the raw metadata. This is needed to lookup arbitrary values.
 	// If a value is known ahead of time it should be added to the struct rather than reading from here,

@@ -51,7 +51,7 @@ import (
 	"istio.io/istio/pilot/test/util"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/mesh"
-	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/test/util/retry"
 	sutil "istio.io/istio/security/pkg/nodeagent/util"
 )
@@ -517,7 +517,7 @@ func TestInjectRequired(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		if got := injectRequired(IgnoredNamespaces, c.config, c.podSpec, c.meta); got != c.want {
+		if got := injectRequired(IgnoredNamespaces.UnsortedList(), c.config, c.podSpec, c.meta); got != c.want {
 			t.Errorf("injectRequired(%v, %v) got %v want %v", c.config, c.meta, got, c.want)
 		}
 	}
@@ -655,7 +655,7 @@ func loadInjectionSettings(t testing.TB, setFlags []string, inFilePath string) (
 
 func splitYamlFile(yamlFile string, t *testing.T) [][]byte {
 	t.Helper()
-	yamlBytes := util.ReadFile(yamlFile, t)
+	yamlBytes := util.ReadFile(t, yamlFile)
 	return splitYamlBytes(yamlBytes, t)
 }
 
@@ -847,16 +847,9 @@ func makeTestData(t testing.TB, skip bool, apiVersion string) []byte {
 	return reviewJSON
 }
 
-func createWebhook(t testing.TB, cfg *Config, pcResources int) (*Webhook, func()) {
+func createWebhook(t testing.TB, cfg *Config, pcResources int) *Webhook {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "webhook_test")
-	if err != nil {
-		t.Fatalf("TempDir() failed: %v", err)
-	}
-	cleanup := func() {
-		_ = os.RemoveAll(dir)
-	}
-	t.Cleanup(cleanup)
+	dir := t.TempDir()
 
 	configBytes, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -909,13 +902,12 @@ func createWebhook(t testing.TB, cfg *Config, pcResources int) (*Webhook, func()
 	if err != nil {
 		t.Fatalf("NewWebhook() failed: %v", err)
 	}
-	return wh, cleanup
+	return wh
 }
 
 func TestRunAndServe(t *testing.T) {
 	// TODO: adjust the test to match prod defaults instead of fake defaults.
-	wh, cleanup := createWebhook(t, minimalSidecarTemplate, 0)
-	defer cleanup()
+	wh := createWebhook(t, minimalSidecarTemplate, 0)
 	stop := make(chan struct{})
 	defer func() { close(stop) }()
 	wh.Run(stop)
@@ -1106,8 +1098,7 @@ func testSideCarInjectorMetrics(t *testing.T) {
 
 func benchmarkInjectServe(pcs int, b *testing.B) {
 	sidecarTemplate, _, _ := loadInjectionSettings(b, nil, "")
-	wh, cleanup := createWebhook(b, sidecarTemplate, pcs)
-	defer cleanup()
+	wh := createWebhook(b, sidecarTemplate, pcs)
 
 	stop := make(chan struct{})
 	defer func() { close(stop) }()
@@ -1286,7 +1277,7 @@ func TestParseInjectEnvs(t *testing.T) {
 func newProxyConfig(name, ns string, spec config.Spec) config.Config {
 	return config.Config{
 		Meta: config.Meta{
-			GroupVersionKind: collections.K8SNetworkingIstioIoV1Beta1Proxyconfigs.Resource().GroupVersionKind(),
+			GroupVersionKind: gvk.ProxyConfig,
 			Name:             name,
 			Namespace:        ns,
 		},

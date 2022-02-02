@@ -235,9 +235,9 @@ func TestManifestGenerateWithDuplicateMutatingWebhookConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	defer func() {
+	t.Cleanup(func() {
 		removeFile(filepath.Join(env.IstioSrc, helm.OperatorSubdirFilePath+"/"+testIstioDiscoveryChartPath+"/"+testResourceFile+".yaml"))
-	}()
+	})
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -277,7 +277,7 @@ func TestManifestGenerateIstiodRemote(t *testing.T) {
 		mwc := mustGetMutatingWebhookConfiguration(g, objs, "istio-sidecar-injector").Unstructured()
 		g.Expect(mwc).Should(HavePathValueEqual(PathValue{"webhooks.[0].clientConfig.url", "https://xxx:15017/inject"}))
 
-		ep := mustGetEndpoint(g, objs, "istiod").Unstructured()
+		ep := mustGetEndpoint(g, objs, "istiod-remote").Unstructured()
 		g.Expect(ep).Should(HavePathValueEqual(PathValue{"subsets.[0].addresses.[0]", endpointSubsetAddressVal("", "169.10.112.88", "")}))
 		g.Expect(ep).Should(HavePathValueContain(PathValue{"subsets.[0].ports.[0]", portVal("tcp-istiod", 15012, -1)}))
 
@@ -532,11 +532,7 @@ func TestBogusControlPlaneSec(t *testing.T) {
 }
 
 func TestInstallPackagePath(t *testing.T) {
-	serverDir, err := os.MkdirTemp(os.TempDir(), "istio-test-server-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(serverDir)
+	serverDir := t.TempDir()
 	if err := tgz.Create(string(liveCharts), filepath.Join(serverDir, testTGZFilename)); err != nil {
 		t.Fatal(err)
 	}
@@ -751,7 +747,7 @@ func runTestGroup(t *testing.T, tests testGroup) {
 				}
 			}
 
-			tutil.RefreshGoldenFile([]byte(got), outPath, t)
+			tutil.RefreshGoldenFile(t, []byte(got), outPath)
 
 			want, err := readFile(outPath)
 			if err != nil {

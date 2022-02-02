@@ -3,6 +3,9 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "global": {
+      "type": "object"
+    },
     "affinity": {
       "type": "object"
     },
@@ -39,7 +42,7 @@
       }
     },
     "env": {
-      "type": "array"
+      "type": "object"
     },
     "labels": {
       "type": "object"

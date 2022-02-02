@@ -232,42 +232,6 @@ func enablePrometheusMerge(mesh *meshconfig.MeshConfig, anno map[string]string) 
 	return true
 }
 
-func ExtractCanonicalServiceLabels(podLabels map[string]string, workloadName string) (string, string) {
-	return extractCanonicalServiceLabel(podLabels, workloadName), extractCanonicalServiceRevision(podLabels)
-}
-
-func extractCanonicalServiceRevision(podLabels map[string]string) string {
-	if rev, ok := podLabels[model.IstioCanonicalServiceRevisionLabelName]; ok {
-		return rev
-	}
-
-	if rev, ok := podLabels["app.kubernetes.io/version"]; ok {
-		return rev
-	}
-
-	if rev, ok := podLabels["version"]; ok {
-		return rev
-	}
-
-	return "latest"
-}
-
-func extractCanonicalServiceLabel(podLabels map[string]string, workloadName string) string {
-	if svc, ok := podLabels[model.IstioCanonicalServiceLabelName]; ok {
-		return svc
-	}
-
-	if svc, ok := podLabels["app.kubernetes.io/name"]; ok {
-		return svc
-	}
-
-	if svc, ok := podLabels["app"]; ok {
-		return svc
-	}
-
-	return workloadName
-}
-
 func toAdmissionResponse(err error) *kube.AdmissionResponse {
 	return &kube.AdmissionResponse{Result: &metav1.Status{Message: err.Error()}}
 }
@@ -590,6 +554,10 @@ func reorderPod(pod *corev1.Pod, req InjectionParameters) error {
 }
 
 func applyRewrite(pod *corev1.Pod, req InjectionParameters) error {
+	sidecar := FindSidecar(pod.Spec.Containers)
+	if sidecar == nil {
+		return nil
+	}
 	valuesStruct := &opconfig.Values{}
 	if err := gogoprotomarshal.ApplyYAML(req.valuesConfig, valuesStruct); err != nil {
 		log.Infof("Failed to parse values config: %v [%v]\n", err, req.valuesConfig)
@@ -597,10 +565,8 @@ func applyRewrite(pod *corev1.Pod, req InjectionParameters) error {
 	}
 
 	rewrite := ShouldRewriteAppHTTPProbers(pod.Annotations, valuesStruct.GetSidecarInjectorWebhook().GetRewriteAppHTTPProbe())
-	sidecar := FindSidecar(pod.Spec.Containers)
-
 	// We don't have to escape json encoding here when using golang libraries.
-	if rewrite && sidecar != nil {
+	if rewrite {
 		if prober := DumpAppProbers(&pod.Spec, req.meshConfig.GetDefaultConfig().GetStatusPort()); prober != "" {
 			sidecar.Env = append(sidecar.Env, corev1.EnvVar{Name: status.KubeAppProberEnvName, Value: prober})
 		}
@@ -723,7 +689,7 @@ func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.Admission
 	log.Debugf("OldObject: %v", string(req.OldObject.Raw))
 
 	wh.mu.RLock()
-	if !injectRequired(IgnoredNamespaces, wh.Config, &pod.Spec, pod.ObjectMeta) {
+	if !injectRequired(IgnoredNamespaces.UnsortedList(), wh.Config, &pod.Spec, pod.ObjectMeta) {
 		log.Infof("Skipping %s/%s due to policy check", pod.ObjectMeta.Namespace, podName)
 		totalSkippedInjections.Increment()
 		wh.mu.RUnlock()

@@ -54,6 +54,72 @@ func TestShouldSkip(t *testing.T) {
 			false,
 		},
 		{
+			"tested namespace not skip 2",
+			&v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "in-namespace1",
+				},
+			},
+			&config2.BugReportConfig{
+				Include: []*config2.SelectionSpec{
+					{
+						Namespaces: []string{"in*"},
+					},
+				},
+				Exclude: []*config2.SelectionSpec{
+					{
+						Namespaces: []string{"ex*"},
+					},
+				},
+			},
+			"*",
+			false,
+		},
+		{
+			"tested namespace not skip 3",
+			&v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "in-namespace1",
+				},
+			},
+			&config2.BugReportConfig{
+				Include: []*config2.SelectionSpec{
+					{
+						Namespaces: []string{"*name*"},
+					},
+				},
+				Exclude: []*config2.SelectionSpec{
+					{
+						Namespaces: []string{"ex*"},
+					},
+				},
+			},
+			"*",
+			false,
+		},
+		{
+			"tested namespace not skip 4",
+			&v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "in-namespace1",
+				},
+			},
+			&config2.BugReportConfig{
+				Include: []*config2.SelectionSpec{
+					{
+						Namespaces: []string{"*space1"},
+					},
+				},
+				Exclude: []*config2.SelectionSpec{
+					{
+						Namespaces: []string{"ex*"},
+					},
+				},
+			},
+			"*",
+			false,
+		},
+		{
 			"tested namespace skip",
 			&v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -234,7 +300,6 @@ func TestShouldSkip(t *testing.T) {
 					Name: "in-test1",
 					Labels: map[string]string{
 						"l1": "lv1",
-						"l2": "lv2",
 					},
 					Annotations: map[string]string{
 						"a1": "av1",
@@ -275,7 +340,6 @@ func TestShouldSkip(t *testing.T) {
 					{
 						Pods: []string{"in-"},
 						Labels: map[string]string{
-							"l1": "lv1",
 							"l2": "lv2",
 						},
 					},
@@ -332,7 +396,6 @@ func TestShouldSkip(t *testing.T) {
 					{
 						Pods: []string{"in-"},
 						Annotations: map[string]string{
-							"a3": "av3",
 							"a4": "av4",
 						},
 					},

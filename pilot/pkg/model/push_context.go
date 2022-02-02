@@ -274,7 +274,6 @@ type processedDestRules struct {
 // tracks all endpoints in the mesh and they fit in RAM - so limit is few M endpoints.
 // It is possible to split the endpoint tracking in future.
 type XDSUpdater interface {
-
 	// EDSUpdate is called when the list of endpoints or labels in a Service is changed.
 	// For each cluster and hostname, the full list of active endpoints (including empty list)
 	// must be sent. The shard name is used as a key - current implementation is using the
@@ -298,6 +297,9 @@ type XDSUpdater interface {
 	// ProxyUpdate is called to notify the XDS server to send a push to the specified proxy.
 	// The requests may be collapsed and throttled.
 	ProxyUpdate(clusterID cluster.ID, ip string)
+
+	// RemoveShard removes all endpoints for the given shard key
+	RemoveShard(shardKey ShardKey)
 }
 
 // shardRegistry is a simplified interface for registries that can produce a shard key
@@ -1091,8 +1093,7 @@ func (ps *PushContext) InitContext(env *Environment, oldPushContext *PushContext
 		}
 	}
 
-	// TODO: only do this when meshnetworks or gateway service changed
-	ps.initNetworkManager(env)
+	ps.networkMgr = env.NetworkManager
 
 	ps.clusterLocalHosts = env.ClusterLocal().GetClusterLocalHosts()
 
@@ -1182,7 +1183,7 @@ func (ps *PushContext) updateContext(
 		case gvk.RequestAuthentication,
 			gvk.PeerAuthentication:
 			authnChanged = true
-		case gvk.HTTPRoute, gvk.TCPRoute, gvk.GatewayClass, gvk.KubernetesGateway, gvk.TLSRoute:
+		case gvk.HTTPRoute, gvk.TCPRoute, gvk.GatewayClass, gvk.KubernetesGateway, gvk.TLSRoute, gvk.ReferencePolicy:
 			gatewayAPIChanged = true
 			// VS and GW are derived from gatewayAPI, so if it changed we need to update those as well
 			virtualServicesChanged = true
@@ -1445,8 +1446,9 @@ func (ps *PushContext) initVirtualServices(env *Environment) error {
 					ps.virtualServiceIndex.privateByNamespaceAndGateway[ns] = map[string][]config.Config{}
 				}
 				// add to local namespace only
+				private := ps.virtualServiceIndex.privateByNamespaceAndGateway
 				for _, gw := range gwNames {
-					ps.virtualServiceIndex.privateByNamespaceAndGateway[ns][gw] = append(ps.virtualServiceIndex.privateByNamespaceAndGateway[ns][gw], virtualService)
+					private[ns][gw] = append(private[ns][gw], virtualService)
 				}
 			} else if ps.exportToDefaults.virtualService[visibility.Public] {
 				for _, gw := range gwNames {
@@ -1484,10 +1486,10 @@ func (ps *PushContext) initVirtualServices(env *Environment) error {
 						if _, f := ps.virtualServiceIndex.exportedToNamespaceByGateway[string(exportTo)]; !f {
 							ps.virtualServiceIndex.exportedToNamespaceByGateway[string(exportTo)] = map[string][]config.Config{}
 						}
+						exported := ps.virtualServiceIndex.exportedToNamespaceByGateway
 						// add to local namespace only
 						for _, gw := range gwNames {
-							ps.virtualServiceIndex.exportedToNamespaceByGateway[string(exportTo)][gw] =
-								append(ps.virtualServiceIndex.exportedToNamespaceByGateway[string(exportTo)][gw], virtualService)
+							exported[string(exportTo)][gw] = append(exported[string(exportTo)][gw], virtualService)
 						}
 					}
 				}
@@ -1910,6 +1912,16 @@ func (ps *PushContext) getMatchedEnvoyFilters(proxy *Proxy, namespaces string) [
 	return matchedEnvoyFilters
 }
 
+// HasEnvoyFilters checks if an EnvoyFilter exists with the given name at the given namespace.
+func (ps *PushContext) HasEnvoyFilters(name, namespace string) bool {
+	for _, efw := range ps.envoyFiltersByNamespace[namespace] {
+		if efw.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // pre computes gateways per namespace
 func (ps *PushContext) initGateways(env *Environment) error {
 	gatewayConfigs, err := env.List(gvk.Gateway, NamespaceAll)
@@ -1919,13 +1931,16 @@ func (ps *PushContext) initGateways(env *Environment) error {
 
 	sortConfigByCreationTime(gatewayConfigs)
 
-	ps.gatewayIndex.all = gatewayConfigs
-	ps.gatewayIndex.namespace = make(map[string][]config.Config)
-	for _, gatewayConfig := range gatewayConfigs {
-		if _, exists := ps.gatewayIndex.namespace[gatewayConfig.Namespace]; !exists {
-			ps.gatewayIndex.namespace[gatewayConfig.Namespace] = make([]config.Config, 0)
+	if features.ScopeGatewayToNamespace {
+		ps.gatewayIndex.namespace = make(map[string][]config.Config)
+		for _, gatewayConfig := range gatewayConfigs {
+			if _, exists := ps.gatewayIndex.namespace[gatewayConfig.Namespace]; !exists {
+				ps.gatewayIndex.namespace[gatewayConfig.Namespace] = make([]config.Config, 0)
+			}
+			ps.gatewayIndex.namespace[gatewayConfig.Namespace] = append(ps.gatewayIndex.namespace[gatewayConfig.Namespace], gatewayConfig)
 		}
-		ps.gatewayIndex.namespace[gatewayConfig.Namespace] = append(ps.gatewayIndex.namespace[gatewayConfig.Namespace], gatewayConfig)
+	} else {
+		ps.gatewayIndex.all = gatewayConfigs
 	}
 	return nil
 }
@@ -2084,11 +2099,6 @@ func instancesEmpty(m map[int][]*ServiceInstance) bool {
 		}
 	}
 	return true
-}
-
-// pre computes gateways for each network
-func (ps *PushContext) initNetworkManager(env *Environment) {
-	ps.networkMgr = NewNetworkManager(env)
 }
 
 func (ps *PushContext) NetworkManager() *NetworkManager {

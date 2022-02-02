@@ -168,6 +168,8 @@ type ServiceDiscovery struct {
 	WantGetProxyServiceInstances  []*model.ServiceInstance
 	ServicesError                 error
 	GetProxyServiceInstancesError error
+
+	model.NetworkGatewaysHandler
 }
 
 // Services implements discovery interface
@@ -257,12 +259,22 @@ func (sd *ServiceDiscovery) MCSServices() []model.MCSServiceInfo {
 	return nil
 }
 
-type Controller struct{}
+type Controller struct {
+	serviceHandler model.ControllerHandlers
+}
 
-func (c *Controller) AppendServiceHandler(func(*model.Service, model.Event)) {}
+func (c *Controller) AppendServiceHandler(f func(*model.Service, model.Event)) {
+	c.serviceHandler.AppendServiceHandler(f)
+}
 
 func (c *Controller) AppendWorkloadHandler(func(*model.WorkloadInstance, model.Event)) {}
 
 func (c *Controller) Run(<-chan struct{}) {}
 
 func (c *Controller) HasSynced() bool { return true }
+
+func (c *Controller) OnServiceEvent(s *model.Service, e model.Event) {
+	for _, h := range c.serviceHandler.GetServiceHandlers() {
+		h(s, e)
+	}
+}

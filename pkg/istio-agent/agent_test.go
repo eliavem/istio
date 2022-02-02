@@ -487,7 +487,35 @@ func TestAgent(t *testing.T) {
 		}
 		got = []byte(strings.ReplaceAll(string(got), a.agent.cfg.XdsUdsPath, "etc/istio/XDS"))
 
-		testutil.CompareContent(got, filepath.Join(env.IstioSrc, "pkg/istio-agent/testdata/grpc-bootstrap.json"), t)
+		testutil.CompareContent(t, got, filepath.Join(env.IstioSrc, "pkg/istio-agent/testdata/grpc-bootstrap.json"))
+	})
+	t.Run("ROOT CA change", func(t *testing.T) {
+		dir := mktemp()
+		rootCertFileName := "root-cert.pem"
+
+		// use a invalid root cert, XDS will fail with `authentication handshake failed`
+		localRootCert := filepath.Join(env.IstioSrc, "./tests/testdata/local/etc/certs/root-cert.pem")
+		if err := file.Copy(localRootCert, dir, rootCertFileName); err != nil {
+			t.Fatalf("failed to init root CA: %v", err)
+		}
+		a := Setup(t, func(a AgentTest) AgentTest {
+			a.AgentConfig.XDSRootCerts = path.Join(dir, rootCertFileName)
+			return a
+		})
+		meta := proxyConfigToMetadata(t, a.ProxyConfig)
+		if err := test.Wrap(func(t test.Failer) {
+			conn := setupDownstreamConnectionUDS(t, a.AgentConfig.XdsUdsPath)
+			xdsc := xds.NewAdsTest(t, conn).WithMetadata(meta)
+			_ = xdsc.RequestResponseAck(t, nil)
+		}); err == nil {
+			t.Fatalf("connect success with wrong CA")
+		}
+
+		// change ROOT CA, XDS will success
+		if err := file.Copy(path.Join(certDir, rootCertFileName), dir, rootCertFileName); err != nil {
+			t.Fatalf("failed to change root CA: %v", err)
+		}
+		a.Check(t, security.WorkloadKeyCertResourceName, security.RootCertReqResourceName)
 	})
 }
 
@@ -664,7 +692,7 @@ func expectFileChanged(t *testing.T, files ...string) {
 	t.Helper()
 	initials := [][]byte{}
 	for _, f := range files {
-		initials = append(initials, testutil.ReadFile(f, t))
+		initials = append(initials, testutil.ReadFile(t, f))
 	}
 	retry.UntilSuccessOrFail(t, func() error {
 		for i, f := range files {
@@ -684,12 +712,12 @@ func expectFileUnchanged(t *testing.T, files ...string) {
 	t.Helper()
 	initials := [][]byte{}
 	for _, f := range files {
-		initials = append(initials, testutil.ReadFile(f, t))
+		initials = append(initials, testutil.ReadFile(t, f))
 	}
 	for attempt := 0; attempt < 10; attempt++ {
 		time.Sleep(time.Millisecond * 10)
 		for i, f := range files {
-			now := testutil.ReadFile(f, t)
+			now := testutil.ReadFile(t, f)
 			if !reflect.DeepEqual(initials[i], now) {
 				t.Fatalf("file is changed!")
 			}
@@ -738,8 +766,8 @@ func setupCa(t *testing.T, auth *security.FakeAuthenticator) *mock.CAServer {
 	t.Helper()
 	opt := tlsOptions(t)
 	s, err := mock.NewCAServerWithKeyCert(0,
-		testutil.ReadFile(filepath.Join(env.IstioSrc, "./tests/testdata/certs/pilot/ca-key.pem"), t),
-		testutil.ReadFile(filepath.Join(env.IstioSrc, "./tests/testdata/certs/pilot/ca-cert.pem"), t),
+		testutil.ReadFile(t, filepath.Join(env.IstioSrc, "./tests/testdata/certs/pilot/ca-key.pem")),
+		testutil.ReadFile(t, filepath.Join(env.IstioSrc, "./tests/testdata/certs/pilot/ca-cert.pem")),
 		opt)
 	if err != nil {
 		t.Fatal(err)
@@ -761,7 +789,7 @@ func tlsOptions(t *testing.T, extraRoots ...[]byte) grpc.ServerOption {
 	}
 	peerCertVerifier := spiffe.NewPeerCertVerifier()
 	if err := peerCertVerifier.AddMappingFromPEM("cluster.local",
-		testutil.ReadFile(filepath.Join(env.IstioSrc, "./tests/testdata/certs/pilot/root-cert.pem"), t)); err != nil {
+		testutil.ReadFile(t, filepath.Join(env.IstioSrc, "./tests/testdata/certs/pilot/root-cert.pem"))); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range extraRoots {

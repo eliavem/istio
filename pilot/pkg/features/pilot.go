@@ -15,10 +15,12 @@
 package features
 
 import (
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	"istio.io/istio/pilot/pkg/util/sets"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/jwt"
 	"istio.io/pkg/env"
@@ -30,6 +32,13 @@ var (
 		"ISTIO_GPRC_MAXSTREAMS",
 		100000,
 		"Sets the maximum number of concurrent grpc streams.",
+	).Get()
+
+	// MaxRecvMsgSize The max receive buffer size of gRPC received channel of Pilot in bytes.
+	MaxRecvMsgSize = env.RegisterIntVar(
+		"ISTIO_GPRC_MAXRECVMSGSIZE",
+		4*1024*1024,
+		"Sets the max receive buffer size of gRPC stream in bytes.",
 	).Get()
 
 	traceSamplingVar = env.RegisterFloatVar(
@@ -65,15 +74,8 @@ var (
 
 	RequestLimit = env.RegisterFloatVar(
 		"PILOT_MAX_REQUESTS_PER_SECOND",
-		100.0,
+		25.0,
 		"Limits the number of incoming XDS requests per second. On larger machines this can be increased to handle more proxies concurrently.",
-	).Get()
-
-	// MaxRecvMsgSize The max receive buffer size of gRPC received channel of Pilot in bytes.
-	MaxRecvMsgSize = env.RegisterIntVar(
-		"ISTIO_GPRC_MAXRECVMSGSIZE",
-		4*1024*1024,
-		"Sets the max receive buffer size of gRPC stream in bytes.",
 	).Get()
 
 	// FilterGatewayClusterConfig controls if a subset of clusters(only those required) should be pushed to gateways
@@ -104,9 +106,6 @@ var (
 	).Get()
 
 	// HTTP10 will add "accept_http_10" to http outbound listeners. Can also be set only for specific sidecars via meta.
-	//
-	// Alpha in 1.1, may become the default or be turned into a Sidecar API or mesh setting. Only applies to namespaces
-	// where Sidecar is enabled.
 	HTTP10 = env.RegisterBoolVar(
 		"PILOT_HTTP10",
 		false,
@@ -312,6 +311,10 @@ var (
 			"See https://godoc.org/k8s.io/client-go/rest#Config Burst",
 	).Get()
 
+	StatusMaxWorkers = env.RegisterIntVar("PILOT_STATUS_MAX_WORKERS", 100, "The maximum number of workers"+
+		" Pilot will use to keep configuration status up to date.  Smaller numbers will result in higher status latency, "+
+		"but larger numbers may impact CPU in high scale environments.").Get()
+
 	// IstiodServiceCustomHost allow user to bring a custom address for istiod server
 	// for examples: istiod.mycompany.com
 	IstiodServiceCustomHost = env.RegisterStringVar("ISTIOD_CUSTOM_HOST", "",
@@ -335,6 +338,10 @@ var (
 		return durationpb.New(defaultRequestTimeoutVar.Get())
 	}()
 
+	LegacyIngressBehavior = env.RegisterBoolVar("PILOT_LEGACY_INGRESS_BEHAVIOR", false,
+		"If this is set to true, istio ingress will perform the legacy behavior, "+
+			"which does not meet https://kubernetes.io/docs/concepts/services-networking/ingress/#multiple-matches.").Get()
+
 	EnableGatewayAPI = env.RegisterBoolVar("PILOT_ENABLE_GATEWAY_API", true,
 		"If this is set to true, support for Kubernetes gateway-api (github.com/kubernetes-sigs/gateway-api) will "+
 			" be enabled. In addition to this being enabled, the gateway-api CRDs need to be installed.").Get()
@@ -344,11 +351,6 @@ var (
 
 	EnableGatewayAPIDeploymentController = env.RegisterBoolVar("PILOT_ENABLE_GATEWAY_API_DEPLOYMENT_CONTROLLER", true,
 		"If this is set to true, gateway-api resources will automatically provision in cluster deployment, services, etc").Get()
-
-	EnableVirtualServiceDelegate = env.RegisterBoolVar(
-		"PILOT_ENABLE_VIRTUAL_SERVICE_DELEGATE",
-		true,
-		"If set to false, virtualService delegate will not be supported.").Get()
 
 	ClusterName = env.RegisterStringVar("CLUSTER_ID", "Kubernetes",
 		"Defines the cluster and service registry that this Istiod instance is belongs to").Get()
@@ -483,10 +485,6 @@ var (
 		"If set, workload specific DestinationRules will inherit configurations settings from mesh and namespace level rules",
 	).Get()
 
-	StatusMaxWorkers = env.RegisterIntVar("PILOT_STATUS_MAX_WORKERS", 100, "The maximum number of workers"+
-		" Pilot will use to keep configuration status up to date.  Smaller numbers will result in higher status latency, "+
-		"but larger numbers may impact CPU in high scale environments.").Get()
-
 	WasmRemoteLoadConversion = env.RegisterBoolVar("ISTIO_AGENT_ENABLE_WASM_REMOTE_LOAD_CONVERSION", true,
 		"If enabled, Istio agent will intercept ECDS resource update, downloads Wasm module, "+
 			"and replaces Wasm module remote load with downloaded local module file.").Get()
@@ -524,6 +522,11 @@ var (
 		"If enabled, pilot will only send the delta configs as opposed to the state of the world on a "+
 			"Resource Request. This feature uses the delta xds api, but does not currently send the actual deltas.").Get()
 
+	EnableLegacyIstioMutualCredentialName = env.RegisterBoolVar("PILOT_ENABLE_LEGACY_ISTIO_MUTUAL_CREDENTIAL_NAME",
+		false,
+		"If enabled, Gateway's with ISTIO_MUTUAL mode and credentialName configured will use simple TLS. "+
+			"This is to retain legacy behavior only and not recommended for use beyond migration.").Get()
+
 	EnableLegacyAutoPassthrough = env.RegisterBoolVar(
 		"PILOT_ENABLE_LEGACY_AUTO_PASSTHROUGH",
 		false,
@@ -544,6 +547,9 @@ var (
 
 	MulticlusterHeadlessEnabled = env.RegisterBoolVar("ENABLE_MULTICLUSTER_HEADLESS", true,
 		"If true, the DNS name table for a headless service will resolve to same-network endpoints in any cluster.").Get()
+
+	ResolveHostnameGateways = env.RegisterBoolVar("RESOLVE_HOSTNAME_GATEWAYS", true,
+		"If true, hostnames in the LoadBalancer addresses of a Service will be resolved at the control plane for use in cross-network gateways.").Get()
 
 	CertSignerDomain = env.RegisterStringVar("CERT_SIGNER_DOMAIN", "", "The cert signer domain info").Get()
 
@@ -568,6 +574,19 @@ var (
 
 	PrioritizedLeaderElection = env.RegisterBoolVar("PRIORITIZED_LEADER_ELECTION", true,
 		"If enabled, the default revision will steal leader locks from non-default revisions").Get()
+
+	EnableTLSOnSidecarIngress = env.RegisterBoolVar("ENABLE_TLS_ON_SIDECAR_INGRESS", false,
+		"If enabled, the TLS configuration on Sidecar.ingress will take effect").Get()
+
+	InsecureKubeConfigOptions = func() sets.Set {
+		v := env.RegisterStringVar(
+			"PILOT_INSECURE_MULTICLUSTER_KUBECONFIG_OPTIONS",
+			"",
+			"Comma separated list of potentially insecure kubeconfig authentication options that are allowed for multicluster authentication."+
+				"Support values: all authProviders (`gcp`, `azure`, `exec`, `openstack`), "+
+				"`clientKey`, `clientCertificate`, `tokenFile`, and `exec`.").Get()
+		return sets.NewSet(strings.Split(v, ",")...)
+	}()
 )
 
 // EnableEndpointSliceController returns the value of the feature flag and whether it was actually specified.

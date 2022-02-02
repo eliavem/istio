@@ -62,7 +62,6 @@ var (
 	{{ .Collection.VariableName }} = collection.Builder {
 		Name: "{{ .Collection.Name }}",
 		VariableName: "{{ .Collection.VariableName }}",
-		Disabled: {{ .Collection.Disabled }},
 		Resource: resource.Builder {
 			Group: "{{ .Resource.Group }}",
 			Kind: "{{ .Resource.Kind }}",
@@ -100,6 +99,16 @@ var (
 	Kube = collection.NewSchemasBuilder().
 	{{- range .Entries }}
 		{{- if (hasPrefix .Collection.Name "k8s/") }}
+		MustAdd({{ .Collection.VariableName }}).
+		{{- end }}
+	{{- end }}
+		Build()
+
+	// Builtin contains only native Kubernetes collections. This differs from Kube, which has
+  // Kubernetes controlled CRDs
+	Builtin = collection.NewSchemasBuilder().
+	{{- range .Entries }}
+		{{- if .Collection.Builtin }}
 		MustAdd({{ .Collection.VariableName }}).
 		{{- end }}
 	{{- end }}
@@ -147,10 +156,6 @@ func WriteGvk(packageName string, m *ast.Metadata) (string, error) {
 		"k8s/gateway_api/v1alpha2/gateways": "KubernetesGateway",
 	}
 	for _, c := range m.Collections {
-		// Filter out pilot ones, as these are duplicated
-		if c.Pilot {
-			continue
-		}
 		r := m.FindResourceForGroupKind(c.Group, c.Kind)
 		if r == nil {
 			return "", fmt.Errorf("failed to find resource (%s/%s) for collection %s", c.Group, c.Kind, c.Name)

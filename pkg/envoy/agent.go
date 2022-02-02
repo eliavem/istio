@@ -60,7 +60,6 @@ func NewAgent(proxy Proxy, terminationDrainDuration, minDrainDuration time.Durat
 
 // Proxy defines command interface for a proxy
 type Proxy interface {
-
 	// Run command for an epoch, and abort channel
 	Run(int, <-chan error) error
 
@@ -149,11 +148,13 @@ func (a *Agent) terminate() {
 		log.Infof("Checking for active connections...")
 		ticker := time.NewTicker(activeConnectionCheckDelay)
 		for range ticker.C {
-			if a.activeProxyConnections() == 0 {
+			ac := a.activeProxyConnections()
+			if ac == 0 {
 				log.Info("There are no more active connections. terminating proxy...")
 				a.abortCh <- errAbort
 				return
 			}
+			log.Infof("There are still %d active connections", ac)
 		}
 	} else {
 		log.Infof("Graceful termination period is %v, starting...", a.terminationDrainDuration)
@@ -198,6 +199,9 @@ func (a *Agent) activeProxyConnections() int {
 			continue
 		}
 		activeConnections += int(val)
+	}
+	if activeConnections > 0 {
+		log.Debugf("Active connections stats: %s", stats.String())
 	}
 	return activeConnections
 }
